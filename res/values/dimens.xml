@@ -82,6 +82,7 @@
     <dimen name="all_apps_grid_section_y_offset">8dp</dimen>
     <dimen name="all_apps_grid_section_text_size">24sp</dimen>
     <dimen name="all_apps_search_bar_height">60dp</dimen>
+    <dimen name="all_apps_search_area_width">300dp</dimen>
     <dimen name="all_apps_search_bar_prediction_bar_padding">8dp</dimen>
     <dimen name="all_apps_icon_top_bottom_padding">8dp</dimen>
     <dimen name="all_apps_icon_width_gap">24dp</dimen>
@@ -164,4 +165,15 @@
 <!-- Pending widget -->
     <dimen name="pending_widget_min_padding">8dp</dimen>
     <dimen name="pending_widget_elevation">2dp</dimen>
+
+    <dimen name="infomation_count_height">14dp</dimen>
+    <dimen name="infomation_count_min_width">14dp</dimen>
+    <dimen name="infomation_count_textsize">11dp</dimen>
+    <dimen name="infomation_count_padding">4dp</dimen>
+    <dimen name="infomation_count_circle_radius">7dp</dimen>
+
+    <!-- edit mode add,delte screen -->
+    <dimen name="add_screen_width">34dp</dimen>
+    <dimen name="delete_screen_width">14dp</dimen>
+
 </resources>

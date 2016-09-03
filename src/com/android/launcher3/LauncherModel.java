@@ -52,6 +52,7 @@ import com.android.launcher3.compat.PackageInstallerCompat;
 import com.android.launcher3.compat.PackageInstallerCompat.PackageInstallInfo;
 import com.android.launcher3.compat.UserHandleCompat;
 import com.android.launcher3.compat.UserManagerCompat;
+import com.android.launcher3.hideapp.HideAppInfo;
 import com.android.launcher3.model.GridSizeMigrationTask;
 import com.android.launcher3.model.WidgetsModel;
 import com.android.launcher3.util.ComponentKey;
@@ -170,6 +171,11 @@ public class LauncherModel extends BroadcastReceiver
 
     // </ only access in worker thread >
 
+    public static final String ACTION_UNREAD_CHANGED =
+            "com.android.launcher.action.UNREAD_CHANGED";
+    private static final String EXTRA_COMPONENT_NAME = "component_name";
+    private static final String EXTRA_UNREAD_NUMBER = "unread_number";
+
     @Thunk IconCache mIconCache;
 
     @Thunk final LauncherAppsCompat mLauncherApps;
@@ -207,6 +213,95 @@ public class LauncherModel extends BroadcastReceiver
         public void onPageBoundSynchronously(int page);
         public void dumpLogsToLocalData();
     }
+
+    private HashMap<ComponentName, UnreadInfo> mUnreadChangedMap =
+            new HashMap<ComponentName, LauncherModel.UnreadInfo>();
+
+    private class UnreadInfo {
+        ComponentName mComponentName;
+        int mUnreadNum;
+
+        public UnreadInfo(ComponentName componentName, int unreadNum) {
+            mComponentName = componentName;
+            mUnreadNum = unreadNum;
+        }
+    }
+
+    private class UnreadNumberChangeTask implements Runnable {
+        public void run() {
+            ArrayList<UnreadInfo> unreadInfos = new ArrayList<LauncherModel.UnreadInfo>();
+            synchronized (mUnreadChangedMap) {
+                unreadInfos.addAll(mUnreadChangedMap.values());
+                mUnreadChangedMap.clear();
+            }
+
+            final Callbacks callbacks = getCallback();
+            if (callbacks == null) {
+                Log.w(TAG, "Nobody to tell about the new app.  Launcher is probably loading.");
+                return;
+            }
+
+            final ArrayList<AppInfo> unreadChangeFinal = new ArrayList<AppInfo>();
+            for (UnreadInfo uInfo : unreadInfos) {
+                AppInfo info = mBgAllAppsList.unreadNumbersChanged(mApp.getContext(),
+                        uInfo.mComponentName, uInfo.mUnreadNum);
+                if (info != null) {
+                    unreadChangeFinal.add(info);
+                }
+            }
+
+            // update the mainmenu icon
+            if (unreadChangeFinal.isEmpty()) return;
+            mHandler.post(new Runnable() {
+                public void run() {
+                    Callbacks cb = getCallback();
+                    if (cb != null && callbacks == cb) {
+                        cb.bindAppsUpdated(unreadChangeFinal);
+                    }
+                }
+            });
+
+            // update the workspace shortcuts icon
+            final UserHandleCompat user = UserHandleCompat.myUserHandle();
+            final ArrayList<ShortcutInfo> updatedShortcuts = new ArrayList<>();
+            synchronized (sBgLock) {
+                for (ItemInfo info : sBgItemsIdMap) {
+                    if (info instanceof ShortcutInfo && user.equals(info.user)
+                            && info.itemType == LauncherSettings.Favorites.ITEM_TYPE_APPLICATION) {
+                        ShortcutInfo si = (ShortcutInfo) info;
+                        ComponentName cn = si.getTargetComponent();
+                        if (cn != null && unreadContains(unreadChangeFinal, cn)) {
+                            si.updateIcon(mIconCache);
+                            updatedShortcuts.add(si);
+                        }
+                    }
+                }
+            }
+
+            if (!updatedShortcuts.isEmpty()) {
+                mHandler.post(new Runnable() {
+
+                    public void run() {
+                        Callbacks cb = getCallback();
+                        if (cb != null && callbacks == cb) {
+                            cb.bindShortcutsChanged(updatedShortcuts,
+                                    new ArrayList<ShortcutInfo>(), user);
+                        }
+                    }
+                });
+            }
+        }
+        private boolean unreadContains(ArrayList<AppInfo> unreadList, ComponentName cn) {
+            for (AppInfo info : unreadList) {
+                if (info.componentName.equals(cn)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private UnreadNumberChangeTask mUnreadUpdateTask = new UnreadNumberChangeTask();
 
     public interface ItemInfoFilter {
         public boolean filterItem(ItemInfo parent, ItemInfo info, ComponentName cn);
@@ -1115,6 +1210,19 @@ public class LauncherModel extends BroadcastReceiver
         runOnWorkerThread(r);
     }
 
+    public ArrayList<ItemInfo> getWorkspaceItems() {
+        return sBgWorkspaceItems;
+    }
+
+    public ArrayList<LauncherAppWidgetInfo> getAppWidgets() {
+        return sBgAppWidgets;
+    }
+
+    public ArrayList<AppInfo> getAllAppsList() {
+        ArrayList<AppInfo> list = (ArrayList<AppInfo>) mBgAllAppsList.data.clone();
+        return list;
+    }
+
     /**
      * Update the order of the workspace screens in the database. The array list contains
      * a list of screen ids in the order that they should appear.
@@ -1285,10 +1393,20 @@ public class LauncherModel extends BroadcastReceiver
                         PackageUpdatedTask.OP_USER_AVAILABILITY_CHANGE,
                         new String[0], user));
             }
+        } else if (ACTION_UNREAD_CHANGED.equals(action)) {
+            ComponentName componentName = intent.getParcelableExtra(EXTRA_COMPONENT_NAME);
+            int unreadNum = intent.getIntExtra(EXTRA_UNREAD_NUMBER, 0);
+
+            if (componentName == null) return;
+            synchronized (mUnreadChangedMap) {
+                mUnreadChangedMap.put(componentName, new UnreadInfo(componentName, unreadNum));
+            }
+            sWorker.removeCallbacks(mUnreadUpdateTask);
+            sWorker.post(mUnreadUpdateTask);
         }
     }
 
-    void forceReload() {
+    public void forceReload() {
         resetLoadedState(true, true);
 
         // Do this here because if the launcher activity is running it will be restarted.
@@ -2321,6 +2439,8 @@ public class LauncherModel extends BroadcastReceiver
                             null, sWorker);
                 }
 
+                /* Due to the add/remove home screen feature, there allowed to be empty screen,
+                 * no need to delete the empty screen.
                 // Remove any empty screens
                 ArrayList<Long> unusedScreens = new ArrayList<Long>(sBgWorkspaceScreens);
                 for (ItemInfo item: sBgItemsIdMap) {
@@ -2336,6 +2456,7 @@ public class LauncherModel extends BroadcastReceiver
                     sBgWorkspaceScreens.removeAll(unusedScreens);
                     updateWorkspaceScreenOrder(context, sBgWorkspaceScreens);
                 }
+                */
 
                 if (DEBUG_LOADERS) {
                     Log.d(TAG, "loaded workspace in " + (SystemClock.uptimeMillis()-t) + "ms");
@@ -2907,6 +3028,19 @@ public class LauncherModel extends BroadcastReceiver
                     ComponentName cn = si.getTargetComponent();
                     if (cn != null && updatedPackages.contains(cn.getPackageName())) {
                         si.updateIcon(mIconCache);
+                        if(LauncherAppState.isCustomizeShortcutRname()) {
+                            boolean isShortcutInfoRename = false;
+                            if (si.intent != null) {
+                                isShortcutInfoRename = si.intent
+                                        .getBooleanExtra("isShortcutInfoRename", false);
+                            }
+                            if (isShortcutInfoRename) {
+                                String  rename = getshortcutReame(si.id);
+                                if (rename != null) {
+                                    si.title = rename;
+                                }
+                            }
+                        }
                         updatedShortcuts.add(si);
                     }
                 }
@@ -2939,6 +3073,21 @@ public class LauncherModel extends BroadcastReceiver
                 }
             });
         }
+    }
+
+    private String getshortcutReame(long id) {
+        final Uri contentUri = LauncherSettings.Favorites.CONTENT_URI;
+        final Cursor c = mApp.getContext().getContentResolver().query(contentUri,
+                new String[]{LauncherSettings.Favorites.TITLE},"_id" + "=?",
+                new String[]{id+""}, null);
+        if (c != null) {
+           final int titleIndex = c.getColumnIndexOrThrow
+                   (LauncherSettings.Favorites.TITLE);
+           c.moveToFirst();
+           return c.getString(titleIndex);
+        }
+
+        return null;
     }
 
     void enqueuePackageUpdated(PackageUpdatedTask task) {
@@ -3487,6 +3636,16 @@ public class LauncherModel extends BroadcastReceiver
             info.title =  Utilities.trim(c.getString(titleIndex));
         }
 
+        if(LauncherAppState.isCustomizeShortcutRname()) {
+            boolean isShortcutInfoRename = false;
+            if (intent != null) {
+                 isShortcutInfoRename = intent.getBooleanExtra("isShortcutInfoRename", false);
+            }
+            if (c != null && isShortcutInfoRename) {
+                info.title =  c.getString(titleIndex);
+            }
+        }
+
         // fall back to the class name of the activity
         if (info.title == null) {
             info.title = componentName.getClassName();
@@ -3635,6 +3794,11 @@ public class LauncherModel extends BroadcastReceiver
     static boolean isValidProvider(AppWidgetProviderInfo provider) {
         return (provider != null) && (provider.provider != null)
                 && (provider.provider.getPackageName() != null);
+    }
+
+    public void updateShortcutTitle(Context context, ShortcutInfo info, String title) {
+       info.title = title;
+       updateItemInDatabase(context, info);
     }
 
     public void dumpState() {

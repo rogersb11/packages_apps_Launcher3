@@ -52,7 +52,14 @@ public class AppInfo extends ItemInfo {
      */
     boolean usingLowResIcon;
 
+    /**
+     * The time at which the app was first installed.
+     */
+    long firstInstallTime;
+
     public ComponentName componentName;
+
+    public int unreadNum = 0;
 
     static final int DOWNLOADED_FLAG = 1;
     static final int UPDATED_SYSTEM_APP_FLAG = 2;
@@ -83,6 +90,8 @@ public class AppInfo extends ItemInfo {
             IconCache iconCache) {
         this(context, info, user, iconCache,
                 UserManagerCompat.getInstance(context).isQuietModeEnabled(user));
+
+        firstInstallTime = info.getFirstInstallTime();
     }
 
     public AppInfo(Context context, LauncherActivityInfoCompat info, UserHandleCompat user,
@@ -96,6 +105,8 @@ public class AppInfo extends ItemInfo {
         if (quietModeEnabled) {
             isDisabled |= ShortcutInfo.FLAG_DISABLED_QUIET_USER;
         }
+
+        firstInstallTime = info.getFirstInstallTime();
 
         iconCache.getTitleAndIcon(this, info, true /* useLowResIcon */);
         intent = makeLaunchIntent(context, info, user);
@@ -123,6 +134,11 @@ public class AppInfo extends ItemInfo {
         flags = info.flags;
         isDisabled = info.isDisabled;
         iconBitmap = info.iconBitmap;
+        firstInstallTime = info.firstInstallTime;
+    }
+
+    public long getfirstInstallTime() {
+        return firstInstallTime;
     }
 
     @Override
@@ -140,7 +156,8 @@ public class AppInfo extends ItemInfo {
     public static void dumpApplicationInfoList(String tag, String label, ArrayList<AppInfo> list) {
         Log.d(tag, label + " size=" + list.size());
         for (AppInfo info: list) {
-            Log.d(tag, "   title=\"" + info.title + "\" iconBitmap=" + info.iconBitmap 
+            Log.d(tag, "   title=\"" + info.title + "\" iconBitmap=" + info.iconBitmap
+                    + " firstInstallTime=" + info.firstInstallTime
                     + " componentName=" + info.componentName.getPackageName());
         }
     }

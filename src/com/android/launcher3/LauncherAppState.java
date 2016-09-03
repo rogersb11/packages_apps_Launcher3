@@ -47,6 +47,10 @@ public class LauncherAppState {
 
     private static LauncherAppState INSTANCE;
 
+    private static boolean mHaveCustomWorkspace;
+    private static boolean mCustomizeBrowserIcon;
+    private static boolean mCustomizeShortcutRename;
+
     private InvariantDeviceProfile mInvariantDeviceProfile;
 
     private LauncherAccessibilityDelegate mAccessibilityDelegate;
@@ -83,6 +87,12 @@ public class LauncherAppState {
         if (TestingUtils.MEMORY_DUMP_ENABLED) {
             TestingUtils.startTrackingMemory(sContext);
         }
+        mHaveCustomWorkspace = sContext.getResources().getBoolean(
+                R.bool.config_launcher_customWorkspace);
+        mCustomizeBrowserIcon = sContext.getResources().getBoolean(
+                R.bool.config_regional_customize_default_browser_icon);
+        mCustomizeShortcutRename = sContext.getResources().getBoolean(
+                R.bool.config_regional_customize_rename);
 
         mInvariantDeviceProfile = new InvariantDeviceProfile(sContext);
         mIconCache = new IconCache(sContext, mInvariantDeviceProfile);
@@ -109,6 +119,12 @@ public class LauncherAppState {
 
         sContext.registerReceiver(
                 new WallpaperChangedReceiver(), new IntentFilter(Intent.ACTION_WALLPAPER_CHANGED));
+
+        filter = new IntentFilter();
+        if (Utilities.isUnreadCountEnabled(sContext)) {
+            filter.addAction(LauncherModel.ACTION_UNREAD_CHANGED);
+            sContext.registerReceiver(mModel, filter);
+        }
     }
 
     /**
@@ -150,6 +166,17 @@ public class LauncherAppState {
         return mModel;
     }
 
+    public static boolean isCustomWorkspace() {
+        return mHaveCustomWorkspace;
+    }
+
+    public static boolean isCustomizeBrowserIcon() {
+        return mCustomizeBrowserIcon;
+    }
+
+    public static boolean isCustomizeShortcutRname() {
+        return mCustomizeShortcutRename;
+    }
     static void setLauncherProvider(LauncherProvider provider) {
         sLauncherProvider = new WeakReference<LauncherProvider>(provider);
     }

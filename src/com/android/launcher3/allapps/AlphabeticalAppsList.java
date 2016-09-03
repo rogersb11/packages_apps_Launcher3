@@ -16,6 +16,8 @@
 package com.android.launcher3.allapps;
 
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.content.SharedPreferences.Editor;
 import android.support.v7.widget.RecyclerView;
 import android.util.Log;
 import com.android.launcher3.AppInfo;
@@ -23,11 +25,24 @@ import com.android.launcher3.Launcher;
 import com.android.launcher3.LauncherAppState;
 import com.android.launcher3.compat.AlphabeticIndexCompat;
 import com.android.launcher3.compat.UserHandleCompat;
+import com.android.launcher3.ItemInfo;
+import com.android.launcher3.model.AbstractUserComparator;
+import com.android.launcher3.hideapp.HideAppInfo;
+import com.android.launcher3.hideapp.HideAppService;
 import com.android.launcher3.model.AppNameComparator;
+import com.android.launcher3.R;
 import com.android.launcher3.util.ComponentKey;
-
+import com.android.launcher3.xml.ComponentInfo;
+import com.android.launcher3.xml.ComponentParserImpl;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.IOException;
+import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -45,6 +60,10 @@ public class AlphabeticalAppsList {
 
     private static final int FAST_SCROLL_FRACTION_DISTRIBUTE_BY_ROWS_FRACTION = 0;
     private static final int FAST_SCROLL_FRACTION_DISTRIBUTE_BY_NUM_SECTIONS = 1;
+
+    private static final int ALL_APP_ALPHABETICAL_MODE = 1;
+    private static final int ALL_APP_INSTALLATION_TIME_MODE = 2;
+    private static String ALL_APP_SORT_MODE_KEY="all_app_sort_mode";
 
     private final int mFastScrollDistributionMode = FAST_SCROLL_FRACTION_DISTRIBUTE_BY_NUM_SECTIONS;
 
@@ -193,11 +212,20 @@ public class AlphabeticalAppsList {
     private int mNumAppsPerRow;
     private int mNumPredictedAppsPerRow;
     private int mNumAppRowsInAdapter;
+    private int  mAllAppListSortMode;
+    private SharedPreferences mAllAppListPreferences;
+    private boolean isHideAppsMode = false;
+    private List<HideAppInfo> mHideApps = new ArrayList<HideAppInfo>() ;
+    private List<AppInfo> mRemoveApps = new ArrayList<>();
 
     public AlphabeticalAppsList(Context context) {
         mLauncher = (Launcher) context;
         mIndexer = new AlphabeticIndexCompat(context);
         mAppNameComparator = new AppNameComparator(context);
+        mAllAppListPreferences = mLauncher.getSharedPreferences(ALL_APP_SORT_MODE_KEY,
+                Context.MODE_PRIVATE);
+        mAllAppListSortMode = mAllAppListPreferences.getInt(ALL_APP_SORT_MODE_KEY,
+                ALL_APP_ALPHABETICAL_MODE);
     }
 
     /**
@@ -217,6 +245,9 @@ public class AlphabeticalAppsList {
      */
     public void setAdapter(RecyclerView.Adapter adapter) {
         mAdapter = adapter;
+    }
+    public RecyclerView.Adapter getAdapter() {
+        return mAdapter;
     }
 
     /**
@@ -246,6 +277,64 @@ public class AlphabeticalAppsList {
     public List<AdapterItem> getAdapterItems() {
         return mAdapterItems;
     }
+
+    public List<AppInfo> getRemoveApps(){
+        return mRemoveApps;
+    }
+
+    public boolean isHideApp(AppInfo item){
+        for(HideAppInfo info : mHideApps){
+            if(item.componentName.getPackageName().equals(info.getComponentPackage()) &&
+               item.componentName.getClassName().equals(info.getComponentClass())){
+                    return true;
+                }
+            }
+        return false;
+    }
+
+    public void removeHideapp(){
+        List<AppInfo> removepack = new ArrayList<>();
+        for(AppInfo item : mApps){
+            for(HideAppInfo info : mHideApps){
+                if(item.componentName.getPackageName().equals(info.getComponentPackage()) &&
+                item.componentName.getClassName().equals(info.getComponentClass())){
+                    removepack.add(item);
+                }
+            }
+        }
+        if(mHideApps.size() == 0){
+            mRemoveApps.clear();
+        }
+        if(removepack.size() > 0){
+            mRemoveApps.clear();
+            mRemoveApps.addAll(removepack);
+            removeApps(mRemoveApps);
+        }
+    }
+
+    public List<HideAppInfo>  readHideAppList() throws Exception{
+        File xmlFile = new File(mLauncher.getFilesDir(), "hide.xml");
+        FileInputStream inputStream = new FileInputStream(xmlFile);
+        List<HideAppInfo> hideapps = new ArrayList<HideAppInfo>() ;
+        try {
+            hideapps = HideAppService.read(inputStream);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        mHideApps.clear();
+        mHideApps.addAll(hideapps);
+        return hideapps;
+    }
+    public void saveHideAppList() throws Exception{
+        File xmlFile = new File(mLauncher.getFilesDir(), "hide.xml");
+        FileOutputStream outStream = new FileOutputStream(xmlFile);
+        HideAppService.save(mHideApps, outStream);
+    }
+
+    public void showHideapp(){
+        addApps(mRemoveApps);
+    }
+
 
     /**
      * Returns the number of rows of applications (not including predictions)
@@ -315,6 +404,15 @@ public class AlphabeticalAppsList {
      */
     public void addApps(List<AppInfo> apps) {
         updateApps(apps);
+        if(!isHideAppsMode){
+            try {
+                readHideAppList();
+                removeHideapp();
+            } catch (Exception e) {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            }
+        }
     }
 
     /**
@@ -336,6 +434,127 @@ public class AlphabeticalAppsList {
         }
         onAppsUpdated();
     }
+    public void lockPreloadingApps() {
+        List<ComponentInfo> custom_app_list = null;
+        try {
+            InputStream is = mLauncher.getAssets().open("custom_main_menu.xml");
+            ComponentParserImpl pbp = new ComponentParserImpl();
+            custom_app_list = pbp.parse(is);
+        } catch (IOException e) {
+            e.printStackTrace();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        if (custom_app_list != null && !custom_app_list.isEmpty()) {
+            for (int i = 0; i < custom_app_list.size(); i++) {
+                for (int j = 0; j < mApps.size(); j++) {
+                    AppInfo info = mApps.get(j);
+                    ComponentInfo cinfo = custom_app_list.get(i);
+                    if (null != info && null != cinfo && null != info.componentName &&
+                            info.componentName.getPackageName().
+                            equals(cinfo.getComponentPackage()) &&
+                            info.componentName.getClassName().
+                            equals(cinfo.getComponentClass())) {
+                        int row = cinfo.getRow() + 1;
+                        int column = cinfo.getColumn() + 1;
+                        int lockpos = mNumAppsPerRow * (row - 1) + column;
+                        if (column <= mNumAppsPerRow && lockpos <= mApps.size()) {
+                            Collections.swap(mApps, lockpos - 1, j);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    public void saveAllAppSortPreferences(){
+        Editor editor = mAllAppListPreferences.edit();
+        editor.putInt(ALL_APP_SORT_MODE_KEY, new Integer(mAllAppListSortMode));
+        editor.commit();
+    }
+
+    public void sortLetterApp(List<AppInfo> apps) {
+        mAllAppListSortMode = ALL_APP_ALPHABETICAL_MODE;
+        saveAllAppSortPreferences();
+        Collections.sort(apps, mAppNameComparator.getAppInfoComparator());
+        if(!isHideAppsMode){
+            updateAdapterItems();
+        }
+    }
+
+    public void sortInstallTimeApp(List<AppInfo> apps) {
+        mAllAppListSortMode = ALL_APP_INSTALLATION_TIME_MODE;
+        saveAllAppSortPreferences();
+        Collections.sort(apps, new AbstractUserComparator<ItemInfo>(mLauncher) {
+            public int compare(ItemInfo obj1, ItemInfo obj2) {
+                AppInfo a = (AppInfo) obj1;
+                AppInfo b = (AppInfo) obj2;
+
+                long firstInstallTime1 = a.getfirstInstallTime();
+                long firstInstallTime2 = b.getfirstInstallTime();
+
+                if (firstInstallTime1 > firstInstallTime2) {
+                    return 1;
+                } else if (firstInstallTime1 < firstInstallTime2) {
+                    return -1;
+                } else {
+                    int result = compareTitles(a, b);
+                    if (result == 0) {
+                        return super.compare(a, b);
+                    }
+                    return result;
+                }
+            }
+        });
+        if(!isHideAppsMode){
+            updateAdapterItems();
+        }
+    }
+
+    int compareTitles(AppInfo a, AppInfo b) {
+        // Ensure that we de-prioritize any titles that don't start with a linguistic letter or
+        // digit
+        String titleA = a.title.toString();
+        String titleB = b.title.toString();
+        boolean aStartsWithLetter = (titleA.length() > 0) &&
+                Character.isLetterOrDigit(titleA.codePointAt(0));
+        boolean bStartsWithLetter = (titleB.length() > 0) &&
+                Character.isLetterOrDigit(titleB.codePointAt(0));
+        if (aStartsWithLetter && !bStartsWithLetter) {
+            return -1;
+        } else if (!aStartsWithLetter && bStartsWithLetter) {
+            return 1;
+        }
+
+        // Order by the title in the current locale
+        int result = Collator.getInstance().compare(titleA, titleB);
+        if (result == 0) {
+            AppInfo aAppInfo = (AppInfo) a;
+            AppInfo bAppInfo = (AppInfo) b;
+            // If two apps have the same title, then order by the component name
+            result = aAppInfo.componentName.compareTo(bAppInfo.componentName);
+            if (result == 0) {
+                // If the two apps are the same component, then prioritize by the order
+                // that
+                // the app user was created (prioritizing the main user's apps)
+                return result;
+            }
+        }
+        return result;
+    }
+
+    public void  setHideAppsMode(boolean mode){
+        isHideAppsMode = mode;
+        mAdapter.notifyDataSetChanged();
+    }
+
+    public boolean  getHideAppsMode(){
+        return isHideAppsMode;
+    }
+    public List<HideAppInfo>  getHideApps(){
+        return mHideApps;
+    }
+
 
     /**
      * Updates internals when the set of apps are updated.
@@ -344,8 +563,6 @@ public class AlphabeticalAppsList {
         // Sort the list of apps
         mApps.clear();
         mApps.addAll(mComponentToAppMap.values());
-        Collections.sort(mApps, mAppNameComparator.getAppInfoComparator());
-
         // As a special case for some languages (currently only Simplified Chinese), we may need to
         // coalesce sections
         Locale curLocale = mLauncher.getResources().getConfiguration().locale;
@@ -382,6 +599,30 @@ public class AlphabeticalAppsList {
                 // Add the section to the cache
                 getAndUpdateCachedSectionName(info.title);
             }
+        }
+        if (mAllAppListSortMode == ALL_APP_ALPHABETICAL_MODE) {
+            Collections.sort(mApps, mAppNameComparator.getAppInfoComparator());
+        } else if (mAllAppListSortMode == ALL_APP_INSTALLATION_TIME_MODE) {
+            sortInstallTimeApp(mApps);
+        }
+        if (LauncherAppState.isCustomWorkspace()) {
+            lockPreloadingApps();
+        }
+        if(isHideAppsMode){
+            List<AppInfo> noHideApps = new ArrayList<>();
+            for (AppInfo info : mApps) {
+                if(!isHideApp(info)){
+                    noHideApps.add(info);
+                }
+            }
+            if(mAllAppListSortMode == ALL_APP_ALPHABETICAL_MODE){
+                sortLetterApp(mRemoveApps);
+            } else if(mAllAppListSortMode == ALL_APP_INSTALLATION_TIME_MODE){
+                sortInstallTimeApp(mRemoveApps);
+            }
+            mApps.clear();
+            mApps.addAll(mRemoveApps);
+            mApps.addAll(noHideApps);
         }
 
         // Recompose the set of adapter items from the current set of apps

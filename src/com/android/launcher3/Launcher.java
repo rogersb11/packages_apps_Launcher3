@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2016 The Linux Foundation. All rights reserved.
  * Copyright (C) 2008 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -97,12 +98,14 @@ import android.widget.Toast;
 import com.android.launcher3.DropTarget.DragObject;
 import com.android.launcher3.PagedView.PageSwitchListener;
 import com.android.launcher3.allapps.AllAppsContainerView;
+import com.android.launcher3.allapps.AllAppsGridAdapter;
 import com.android.launcher3.allapps.DefaultAppSearchController;
 import com.android.launcher3.compat.AppWidgetManagerCompat;
 import com.android.launcher3.compat.LauncherActivityInfoCompat;
 import com.android.launcher3.compat.LauncherAppsCompat;
 import com.android.launcher3.compat.UserHandleCompat;
 import com.android.launcher3.compat.UserManagerCompat;
+import com.android.launcher3.hideapp.HideAppInfo;
 import com.android.launcher3.model.WidgetsModel;
 import com.android.launcher3.util.ComponentKey;
 import com.android.launcher3.util.LongArrayMap;
@@ -174,6 +177,10 @@ public class Launcher extends Activity
     // The Intent extra that defines whether to ignore the launch animation
     static final String INTENT_EXTRA_IGNORE_LAUNCH_ANIMATION =
             "com.android.launcher3.intent.extra.shortcut.INGORE_LAUNCH_ANIMATION";
+
+    //Intent broadcasted when the device screen switches to idle(home screen)
+    public static final String CAT_IDLE_SCREEN_ACTION =
+            "org.codeaurora.action.stk.idle_screen";
 
     // Type: int
     private static final String RUNTIME_STATE_CURRENT_SCREEN = "launcher.current_screen";
@@ -344,6 +351,9 @@ public class Launcher extends Activity
     // the press state and keep this reference to reset the press state when we return to launcher.
     private BubbleTextView mWaitingForResume;
 
+    private Context mContext;
+    private ArrayList<Long> mEmptyScreenList;
+
     protected static HashMap<String, CustomAppWidget> sCustomAppWidgets =
             new HashMap<String, CustomAppWidget>();
 
@@ -443,6 +453,9 @@ public class Launcher extends Activity
         // this also ensures that any synchronous binding below doesn't re-trigger another
         // LauncherModel load.
         mPaused = false;
+
+        mContext = this;
+        mEmptyScreenList = new ArrayList<Long>();
 
         if (PROFILE_STARTUP) {
             android.os.Debug.startMethodTracing(
@@ -971,6 +984,7 @@ public class Launcher extends Activity
         if (mOnResumeState == State.WORKSPACE) {
             showWorkspace(false);
         } else if (mOnResumeState == State.APPS) {
+            mWorkspace.setVisibility(View.INVISIBLE);
             boolean launchedFromApp = (mWaitingForResume != null);
             // Don't update the predicted apps if the user is returning to launcher in the apps
             // view after launching an app, as they may be depending on the UI to be static to
@@ -1069,6 +1083,13 @@ public class Launcher extends Activity
         if (mLauncherCallbacks != null) {
             mLauncherCallbacks.onResume();
         }
+
+        // Notify that Home or Idle Screen is being started or resumed
+        Intent idleScreenIntent = new Intent(CAT_IDLE_SCREEN_ACTION);
+        idleScreenIntent.putExtra("SCREEN_IDLE",true);
+        Log.d(TAG,"Broadcasting Home Idle Screen Intent ...");
+        sendBroadcast(idleScreenIntent);
+
     }
 
     @Override
@@ -2469,6 +2490,11 @@ public class Launcher extends Activity
         }
 
         if (isAppsViewVisible()) {
+            if (mAppsView.getHideAppsMode()) {
+                mAppsView.exitHideMode();
+                mAppsView.getApps().removeHideapp();
+                return;
+            }
             showWorkspace(true);
         } else if (isWidgetsViewVisible())  {
             showOverviewMode(true);
@@ -2541,7 +2567,35 @@ public class Launcher extends Activity
         } else if (v == mAllAppsButton) {
             onClickAllAppsButton(v);
         } else if (tag instanceof AppInfo) {
-            startAppShortcutOrInfoActivity(v);
+            if (mAppsView.getHideAppsMode()) {
+                int pos = ((BubbleTextView) v).getPosition();
+                if (AllAppsGridAdapter.mHideMap.get(pos) == View.VISIBLE) {
+                    AllAppsGridAdapter.mHideMap.put(pos, View.INVISIBLE);
+                } else {
+                    AllAppsGridAdapter.mHideMap.put(pos, View.VISIBLE);
+                }
+                AppInfo info = (AppInfo) tag;
+                HideAppInfo hideinfo = new HideAppInfo();
+                hideinfo.setComponentPackage(info.componentName.getPackageName());
+                hideinfo.setComponentClass(info.componentName.getClassName());
+                List<HideAppInfo> hidelist = mAppsView.getApps().getHideApps();
+
+                boolean isExit = false;
+                for (HideAppInfo hinfo : hidelist) {
+                    if (hideinfo.getComponentPackage().equals(hinfo.getComponentPackage())
+                            && hideinfo.getComponentClass().equals(hinfo.getComponentClass())) {
+                        isExit = true;
+                        hidelist.remove(hinfo);
+                        break;
+                    }
+                }
+                if (isExit == false) {
+                    hidelist.add(hideinfo);
+                }
+                mAppsView.getAdapter().notifyDataSetChanged();
+            } else {
+                startAppShortcutOrInfoActivity(v);
+            }
         } else if (tag instanceof LauncherAppWidgetInfo) {
             if (v instanceof PendingAppWidgetHostView) {
                 onClickPendingWidget((PendingAppWidgetHostView) v);
@@ -3254,7 +3308,11 @@ public class Launcher extends Activity
                 mWorkspace.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS,
                         HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING);
                 if (mWorkspace.isInOverviewMode()) {
-                    mWorkspace.startReordering(v);
+                    long screenId = mWorkspace.getIdForScreen((CellLayout)v);
+
+                    if (screenId != mWorkspace.EXTRA_EMPTY_SCREEN_ID) {
+                        mWorkspace.startReordering(v);
+                    }
                 } else {
                     showOverviewMode(true);
                 }
@@ -3372,8 +3430,22 @@ public class Launcher extends Activity
      * @return whether or not the Launcher state changed.
      */
     boolean showWorkspace(int snapToPage, boolean animated, Runnable onCompleteRunnable) {
+        mWorkspace.removeAddScreen();
+
         boolean changed = mState != State.WORKSPACE ||
                 mWorkspace.getState() != Workspace.State.NORMAL;
+        int childCount = mWorkspace.getChildCount();
+
+        for (int i = 0; i < childCount; i++) {
+            CellLayout cl = (CellLayout) mWorkspace.getChildAt(i);
+            long screenId = mWorkspace.getIdForScreen(cl);
+
+            if(mEmptyScreenList.indexOf(screenId) != -1){
+                removeDeleteScreenLayout(cl);
+            }
+        }
+        mEmptyScreenList.clear();
+
         if (changed) {
             mWorkspace.setVisibility(View.VISIBLE);
             mStateTransitionAnimation.startAnimationToWorkspace(mState, mWorkspace.getState(),
@@ -3407,6 +3479,83 @@ public class Launcher extends Activity
         showOverviewMode(animated, false);
     }
 
+    public void deleteScreenLayout(CellLayout cell) {
+        if (null == cell) { return; }
+
+        final CellLayout emptyscreen = cell;
+        LayoutInflater inflater = LayoutInflater.from(this);
+        final View contentview = (View)inflater.inflate(
+                R.layout.delete_screen_button, cell, false);
+
+        View deletecontainer = (View)contentview.findViewById(R.id.delete_container);
+        TextView deleteScreenButton = (TextView)contentview.findViewById(R.id.delete_btn);
+        Drawable d = getResources().getDrawable(R.drawable.screen_close);
+
+        deleteScreenButton.setBackgroundDrawable(d);
+        final CellLayout.LayoutParams lp = new CellLayout.LayoutParams(3, 0, 1, 1);
+        emptyscreen.addViewToCellLayout(contentview, -1, contentview.getId(), lp, true);
+
+        deletecontainer.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View arg0) {
+                mWorkspace.deleteScreenLayoutTransitions(emptyscreen);
+                long screenId = mWorkspace.getIdForScreen(emptyscreen);
+                ArrayList<Long> workspaceScreens = mWorkspace.getScreenOrder();
+
+                workspaceScreens.remove(screenId);
+                mWorkspace.removeView(emptyscreen);
+                getModel().updateWorkspaceScreenOrder(mContext, workspaceScreens);
+                mEmptyScreenList.remove(screenId);
+                removeDeleteScreenLayout(emptyscreen);
+            }
+        });
+    }
+
+    public void removeDeleteScreenLayout(CellLayout cell) {
+        if (null == cell) { return; }
+
+        View view = cell.getChildAt(3, 0);
+        cell.removeView(view);
+    }
+
+    public void AddScreenLayout() {
+        if (null == mWorkspace
+                || (null != mWorkspace && mWorkspace.getChildCount() - 1 < 0)) {
+            return;
+        }
+
+        final CellLayout addScreen = (CellLayout) mWorkspace.
+                getChildAt(mWorkspace.getChildCount() - 1);
+        LayoutInflater inflater = LayoutInflater.from(this);
+        final View contentview = (View)inflater.inflate(
+                R.layout.add_screen_button, addScreen, false);
+
+        View add_container = (View) contentview.findViewById(R.id.add_btn_container);
+        TextView addScreenButton = (TextView) contentview.findViewById(R.id.add_btn);
+        Drawable d = getResources().getDrawable(R.drawable.screen_add);
+        addScreenButton.setBackgroundDrawable(d);
+
+        final CellLayout.LayoutParams lp = new CellLayout.LayoutParams(1, 1, 2, 2);
+        addScreen.addViewToCellLayout(contentview, -1, contentview.getId(), lp, true);
+
+        add_container.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View arg0) {
+                mWorkspace.commitExtraEmptyScreen();
+                mWorkspace.saveWorkspaceScreenToDb((CellLayout) mWorkspace.
+                        getChildAt(mWorkspace.getChildCount() - 1));
+                mWorkspace.addExtraEmptyScreen();
+
+                int finalIndex = mWorkspace.getChildCount() - 1;
+                CellLayout addscreen = (CellLayout) mWorkspace.getChildAt(finalIndex);
+                CellLayout emptyscreen = (CellLayout) mWorkspace.getChildAt(finalIndex - 1);
+
+                emptyscreen.removeAllViews();
+                addscreen.addViewToCellLayout(contentview, -1, contentview.getId(), lp, true);
+                showOverviewMode(true);
+            }
+        });
+    }
     /**
      * Shows the overview button, and if {@param requestButtonFocus} is set, will force the focus
      * onto one of the overview panel buttons.
@@ -3424,12 +3573,33 @@ public class Launcher extends Activity
                 }
             };
         }
+
+        mWorkspace.addExtraEmptyScreen();
+        AddScreenLayout();
         mWorkspace.setVisibility(View.VISIBLE);
+
+        int childCount = mWorkspace.getChildCount();
+        for (int i = 0; i < childCount; i++) {
+            CellLayout cl = (CellLayout) mWorkspace.getChildAt(i);
+            long screenId = mWorkspace.getIdForScreen(cl);
+
+            if (null != cl && null != cl.getShortcutsAndWidgets()
+                    && cl.getShortcutsAndWidgets().getChildCount() == 0) {
+
+                deleteScreenLayout(cl);
+                mEmptyScreenList.add(screenId);
+            }
+        }
+
         mStateTransitionAnimation.startAnimationToWorkspace(mState, mWorkspace.getState(),
                 Workspace.State.OVERVIEW,
                 WorkspaceStateTransitionAnimation.SCROLL_TO_CURRENT_PAGE, animated,
                 postAnimRunnable);
         mState = State.WORKSPACE;
+    }
+
+    public ArrayList<Long> getEmptyScreenList(){
+        return mEmptyScreenList;
     }
 
     /**
@@ -4164,7 +4334,8 @@ public class Launcher extends Activity
         }
         if (mSavedState != null) {
             if (!mWorkspace.hasFocus()) {
-                mWorkspace.getChildAt(mWorkspace.getCurrentPage()).requestFocus();
+                View v = mWorkspace.getChildAt(mWorkspace.getCurrentPage());
+                if (v != null) v.requestFocus();
             }
             mSavedState = null;
         }
@@ -4826,6 +4997,10 @@ public class Launcher extends Activity
 
     public static HashMap<String, CustomAppWidget> getCustomAppWidgets() {
         return sCustomAppWidgets;
+    }
+
+    public void updateTitleDb(ShortcutInfo info, String title) {
+        mModel.updateShortcutTitle(this, info, title);
     }
 
     public void dumpLogsToLocalData() {
